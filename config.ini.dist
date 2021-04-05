@@ -1,0 +1,8 @@
+[general]
+name=helium-validator-monitor0
+bucket=helium-validator-monitor
+
+[influx2]
+url=http://influxdb:8086/
+org=helium
+token=Long-Secret-Token
