@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from collections import namedtuple
 from influxdb_client import InfluxDBClient, Point
 
+
 import json
 import logging
 import subprocess
@@ -17,7 +18,7 @@ log = logging.getLogger(log_name)
 
 SchedCmd    = namedtuple('SchedCmd', 'args, parser, sched')
 SchedParams = namedtuple('SchedParams', 'period, delay, priority')
-InfluxCtx   = namedtuple('InfluxCtx', 'client, org, bucket')
+InfluxCtx   = namedtuple('InfluxCtx', 'client, org, bucket, write_api')
 
 def str_to_native(s):
     """Convert a string to a native pythonic type if possible"""
@@ -163,9 +164,7 @@ class CmdScheduler(sched.scheduler):
 
             # TODO convert to Points API
             #p = Point(measurement_name)
-            #return write_api.write(bucket=bucket, record=p)
-            write_api = self._influx.client.write_api()
-            return write_api.write(self._influx.bucket, self._influx.org, data)
+            self._influx.write_api.write(self._influx.bucket, self._influx.org, data)
 
         except subprocess.CalledProcessError as cpe:
             log.warning(f"Failed to run \"{cmd.args}\": {cpe}")
@@ -177,7 +176,8 @@ if __name__ == '__main__':
     config_all.read('config.ini')
 
     client = InfluxDBClient.from_config_file("config.ini")
-    influx = InfluxCtx(client, config_all['influx2']['org'], config_all['general']['bucket'])
+    write_api = client.write_api()
+    influx = InfluxCtx(client, config_all['influx2']['org'], config_all['general']['bucket'], write_api)
 
     # TODO Simpler invocation later?
     # /opt/miner/bin/nodetool -B -- -root /usr/local/lib/erlang -progname erl -- -home /root -- -boot no_dot_erlang -noshell -run escript start -- -name maintaf0915d1-val_miner@127.0.0.1 -setcookie miner -- -extra /opt/miner/bin/nodetool -name val_miner@127.0.0.1 rpc miner_console command hbbft perf
