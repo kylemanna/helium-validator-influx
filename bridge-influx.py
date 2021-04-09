@@ -12,7 +12,6 @@ import subprocess
 import time
 import sched
 
-logging.basicConfig(level=logging.INFO)
 log_name = 'validator-monitor' if __name__ == '__main__' else '.'.join((__name__.split('.')[-2:]))
 log = logging.getLogger(log_name)
 
@@ -83,8 +82,9 @@ class MinerParser():
                 #updates[k] = tmp
                 updates[f"{k}"] = tmp[0]
                 updates[f"{k}_total"] = tmp[1]
-                # Handle divide by zero
-                updates[f"{k}_percent"] = float(tmp[0]/tmp[1] if tmp[1] else 0)
+                # Handle divide by zero, don't report anything or it makes the percent graphs display wrong (instead we have no data)
+                if tmp[1]:
+                    updates[f"{k}_percent"] = float(tmp[0]/tmp[1])
 
         d.update(updates)
 
@@ -110,15 +110,12 @@ def miner_parser_handler(resp):
             'last_heart': 'last_heartbeat'
           }
 
-    record = { '@time' : datetime.now(timezone.utc).isoformat() }
-    for row in MinerParser().iter(resp):
-        record[row['name']] = { lut.get(k, k): v for k, v in row.items() }
-    return record
+    return { row['name']: { lut.get(k, k): v for k, v in row.items() } for row in MinerParser().iter(resp) }
 
 # TODO delete in favor of influxdb2 Points API
 def make_measurement(timestamp, name, fields, measurement_name):
     d = { 'measurement': measurement_name,
-          'tags': { 'entity_id': name },
+          'tags': { 'entity_id': name, 'version': fields.get('version') },
           'time': str(timestamp),
           'fields': fields }
     return d
@@ -148,17 +145,18 @@ class CmdScheduler(sched.scheduler):
             self.enterabs(ctx.next, cmd.sched.priority, self.run_cmd, (ctx,))
 
         try:
+            measurement_time = datetime.now(timezone.utc)
+
             # TODO handle stderr
             cp = subprocess.run(cmd.args, universal_newlines=True, stdout=subprocess.PIPE)
             cp.check_returncode()
             raw_data = cmd.parser(cp.stdout)
-            sample_time = datetime.fromisoformat(raw_data['@time'])
 
             data = []
             measurement_name = '_'.join(cmd.args[cmd.args.index('miner')+1:])
             for validator_name, fields in raw_data.items():
                 if validator_name.startswith('@'): continue
-                data += [make_measurement(sample_time, validator_name, fields, measurement_name)]
+                data += [make_measurement(measurement_time, validator_name, fields, measurement_name)]
 
             log.debug(json.dumps(data))
 
@@ -167,9 +165,14 @@ class CmdScheduler(sched.scheduler):
             self._influx.write_api.write(self._influx.bucket, self._influx.org, data)
 
         except subprocess.CalledProcessError as cpe:
-            log.warning(f"Failed to run \"{cmd.args}\": {cpe}")
+            log.warning(f"Exception: {cpe}")
 
 if __name__ == '__main__':
+    # Don't set globally incase used as module which should set this.
+    logging.basicConfig(level=logging.INFO)
+    #format='%(asctime)s %(levelname)-8s %(message)s',
+    #datefmt='%Y-%m-%d %H:%M:%S'
+
     # Load configuration
     import configparser
     config_all = configparser.ConfigParser()
@@ -184,8 +187,11 @@ if __name__ == '__main__':
 
     base_cmd = ('docker', 'exec', 'crypto_helium-validator_1', 'nice', '-n20')
     cmds = (
-        SchedCmd(base_cmd + ('miner', 'hbbft', 'perf'),        miner_parser_handler, SchedParams(20, 0, 10)),
-        SchedCmd(base_cmd + ('miner', 'ledger', 'validators'), miner_parser_handler, SchedParams(30, 10, 100))
+        SchedCmd(base_cmd + ('miner', 'hbbft',  'perf'),       miner_parser_handler, SchedParams(15, 0, 10)),
+        SchedCmd(base_cmd + ('miner', 'ledger', 'validators'), miner_parser_handler, SchedParams(20, 2, 100)),
+        #SchedCmd(base_cmd + ('miner', 'info',   'p2p_status'), WRITE_ME, SchedParams(60, 4, 200))
+        # TODO `ledger variables --all` + parser
+        # TODO `peer book -s` + parser
     )
 
     # Run forever

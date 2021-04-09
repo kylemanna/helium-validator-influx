@@ -1,0 +1,16 @@
+[Unit]
+Description=Helium Validator InfluxDB Monitor
+After=network.target
+
+[Service]
+User=user1
+WorkingDirectory=/home/user1/helium-validator-influx
+ExecStart=/home/user1/helium-validator-influx/bridge-influx.py
+SyslogIdentifier=%N
+
+# Restart every >2 seconds to avoid StartLimitInterval failure
+RestartSec=3
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
