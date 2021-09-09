@@ -113,9 +113,9 @@ def miner_parser_handler(resp):
     return { row['name']: { lut.get(k, k): v for k, v in row.items() } for row in MinerParser().iter(resp) }
 
 # TODO delete in favor of influxdb2 Points API
-def make_measurement(timestamp, name, fields, measurement_name):
+def make_measurement(timestamp, name, fields, measurement_name, net = 'test2'):
     d = { 'measurement': measurement_name,
-          'tags': { 'entity_id': name, 'version': fields.get('version') },
+          'tags': { 'entity_id': name, 'version': fields.get('version'), 'net': net},
           'time': str(timestamp),
           'fields': fields }
     return d
@@ -185,7 +185,7 @@ if __name__ == '__main__':
     # TODO Simpler invocation later?
     # /opt/miner/bin/nodetool -B -- -root /usr/local/lib/erlang -progname erl -- -home /root -- -boot no_dot_erlang -noshell -run escript start -- -name maintaf0915d1-val_miner@127.0.0.1 -setcookie miner -- -extra /opt/miner/bin/nodetool -name val_miner@127.0.0.1 rpc miner_console command hbbft perf
 
-    base_cmd = ('docker', 'exec', 'crypto_helium-validator_1', 'nice', '-n20')
+    base_cmd = ('docker', 'exec', '-te', 'COLUMNS=200', 'crypto_helium-validator_1', 'nice', '-n20')
     cmds = (
         SchedCmd(base_cmd + ('miner', 'hbbft',  'perf'),       miner_parser_handler, SchedParams(15, 0, 10)),
         SchedCmd(base_cmd + ('miner', 'ledger', 'validators'), miner_parser_handler, SchedParams(20, 2, 100)),
