@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 from dataclasses import dataclass
 from collections import namedtuple
 from influxdb_client import InfluxDBClient, Point
+from influxdb_client.client.write_api import PointSettings
+from miner_client import MinerClient
 
+from functools import partial
 
 import json
 import logging
@@ -15,9 +18,9 @@ import sched
 log_name = 'validator-monitor' if __name__ == '__main__' else '.'.join((__name__.split('.')[-2:]))
 log = logging.getLogger(log_name)
 
-SchedCmd    = namedtuple('SchedCmd', 'args, parser, sched')
+SchedCmd    = namedtuple('SchedCmd', 'method, handler, sched')
 SchedParams = namedtuple('SchedParams', 'period, delay, priority')
-InfluxCtx   = namedtuple('InfluxCtx', 'client, org, bucket, write_api')
+InfluxCtx   = namedtuple('InfluxCtx', 'client, bucket, write_api')
 
 def str_to_native(s):
     """Convert a string to a native pythonic type if possible"""
@@ -39,87 +42,86 @@ def str_to_native(s):
 
     return s
 
-class MinerParser():
-    """Parse Helium Miner command responses"""
-    headings = None
 
-    def parse(self, line: str):
-        """Parse a single miner command line response"""
+def info_p2p_status_handler(pt, raw_result):
+    """ Example:
+    >>> mc.info_p2p_stats()
+    {'connected': 'yes', 'dialable': 'yes', 'height': 1007194, 'nat_type': 'none'}
+    """
 
-        # Table formatting
-        if line.startswith('+-') or line == '\n':
-            return None
+    p2p_status = raw_result
+    pt.field('height',   p2p_status['height'])
+    pt.field('nat_type', p2p_status['nat_type'])
+    pt.field('connected', 1 if p2p_status['connected'] == 'yes'  else 0)
+    pt.field('dialable',  1 if p2p_status['dialable']  == 'yes'  else 0)
+    pt.field('nat',       0 if p2p_status['nat_type']  == 'none' else 1)
 
-        d = tuple(filter(lambda x: len(x), (i.strip() for i in line.split('|'))))
-        if d[0] == 'name':
-            # heading row
-            if not self.headings:
-                self.headings = d
-            return None
+    return pt
 
-        try:
-            if len(d) != len(self.headings):
-                #log.error()
-                print("Warning: heading and column lengths don't match, skipping")
-                return None
-        except:
-            print(f"Error: {d=}")
-            print(f"Error: {self.headings=}")
-            # This may not occur if return code is properly checked? Raise to blow up.
-            raise
+def peer_book_handler(pt, raw_result):
+    """ Example:
+    >>> print(json.dumps(mc.peer_book('self')[0], indent=2))
+    {
+      "address": "/p2p/13zjYv9VDPubyLKxX7asVGzTbtzp3hBhqRXRroaTLjJbuPHXquC",
+      "connection_count": 15,
+      "last_updated": "253.873",
+      "listen_addr_count": 1,
+      "listen_addresses": [
+        "/ip4/70.140.215.106/tcp/2154"
+      ],
+      "name": "tricky-teal-tiger",
+      "nat": "none",
+      "sessions": [
+        {
+          "local": "/ip4/172.20.0.2/tcp/2154",
+          "name": "immense-ginger-frog",
+          "p2p": "/p2p/1124HEFuFcdtvSeZeD1QfnrBgLTvxbDJzdzQncshaEtcnuep3RRh",
+          "remote": "/ip4/67.180.217.101/tcp/44158"
+        },
+      ]
+    }
+    """
 
-        d = { k: str_to_native(v) for k, v in zip(self.headings, d)}
-        updates = {}
+    peer_book = raw_result[0]
+    #print(f"peer_book: {json.dumps(peer_book)}")
 
-        for k, v in d.items():
-            if not isinstance(v, str): continue
+    pt.field('connection_count', peer_book['connection_count'])
+    pt.field('listen_addr_count', peer_book['listen_addr_count'])
+    pt.field('nat', 0 if peer_book['nat'] == 'none' else 1)
+    pt.field('session_count', len(peer_book['sessions']))
 
-            # Parse helium ratios and add a '${key}_percent' field to simplify downstream processing
-            tmp = v.split('/')
-            if len(tmp) == 2:
-                tmp = tuple(int(i) for i in tmp)
-                # InfluxDB doesn't udnerstand a list/tuple, overwrite the string
-                #updates[k] = tmp
-                updates[f"{k}"] = tmp[0]
-                updates[f"{k}_total"] = tmp[1]
-                # Handle divide by zero, don't report anything or it makes the percent graphs display wrong (instead we have no data)
-                if tmp[1]:
-                    updates[f"{k}_percent"] = float(tmp[0]/tmp[1])
+    try:    pt.field('last_updated', int(peer_book['last_updated']))
+    except: pass
 
-        d.update(updates)
+    return pt
 
-        return d
+def ledger_validators_handler(pt, raw_result):
+    """ Example:
+    >>> print(json.dumps(mc.ledger_validators()[0], indent=4))
+    {
+        "address": "1ZRHW1VCMgazNhKpGzAmbNN9RBf2gDKZGW4LvkigGtwBUpandW2",
+        "dkg_penalty": 0.0,
+        "last_heartbeat": 1007179,
+        "name": "sticky-purple-frog",
+        "nonce": 1,
+        "owner_address": "12yYJYcqjc3kAhiZnB9Q1jhQs5hoL1VJATh2w6LGejPtF4X1zUw",
+        "performance_penalty": 0.0,
+        "stake": 0,
+        "status": "unstaked",
+        "tenure_penalty": 0.0,
+        "total_penalty": 0.0,
+        "version": 1
+    }
+    """
 
-    def iter(self, resp: str):
-        """Return a generator processing a command response"""
-        row = None
-        for line in resp.rstrip().splitlines():
-            row = self.parse(line)
-            if row:
-                yield row
-
-
-def miner_parser_handler(resp):
-    """Parse Helium Miner output and frame appropriately"""
-
-    # Correct truncated field names
-    # TODO: Determine how to not get truncated field names in the first place without a pty
-    # truncated cmds: "miner ledger validators"
-    lut = { 'failur': 'failure',
-            'versi': 'version',
-            'last_heart': 'last_heartbeat'
-          }
-
-    return { row['name']: { lut.get(k, k): v for k, v in row.items() } for row in MinerParser().iter(resp) }
-
-# TODO delete in favor of influxdb2 Points API
-def make_measurement(timestamp, name, fields, measurement_name, net = 'test2'):
-    d = { 'measurement': measurement_name,
-          'tags': { 'entity_id': name, 'version': fields.get('version'), 'net': net},
-          'time': str(timestamp),
-          'fields': fields }
-    return d
-
+    try:
+        validator = raw_result
+        keys = ['dkg_penalty', 'last_heartbeat', 'performance_penalty', 'stake', 'status', 'tenure_penalty', 'total_penalty', 'version']
+        for k in keys:
+            pt.field(k, validator[k])
+        return pt
+    except:
+        pass
 
 class CmdScheduler(sched.scheduler):
     @dataclass
@@ -132,6 +134,7 @@ class CmdScheduler(sched.scheduler):
         super().__init__()
 
         self._influx = influx
+
         start = time.monotonic()
         for cmd in cmds:
             ctx = self.CmdContext(cmd, start + cmd.sched.delay)
@@ -144,28 +147,18 @@ class CmdScheduler(sched.scheduler):
             ctx.next += cmd.sched.period
             self.enterabs(ctx.next, cmd.sched.priority, self.run_cmd, (ctx,))
 
-        try:
-            measurement_time = datetime.now(timezone.utc)
+        raw_result = cmd.method()
+        #log.debug(f"{cmd.method} -> {raw_result}")
 
-            # TODO handle stderr
-            cp = subprocess.run(cmd.args, universal_newlines=True, stdout=subprocess.PIPE)
-            cp.check_returncode()
-            raw_data = cmd.parser(cp.stdout)
+        measurement_name = cmd.method.func.__name__ if isinstance(cmd.method, partial) else cmd.method.__name__
 
-            data = []
-            measurement_name = '_'.join(cmd.args[cmd.args.index('miner')+1:])
-            for validator_name, fields in raw_data.items():
-                if validator_name.startswith('@'): continue
-                data += [make_measurement(measurement_time, validator_name, fields, measurement_name)]
+        pt = Point(measurement_name).time(datetime.now(timezone.utc))
+        result = ctx.cmd.handler(pt, raw_result)
+        #log.debug(f"Point(s) {result}")
 
-            log.debug(json.dumps(data))
+        if result:
+            self._influx.write_api.write(self._influx.bucket, None, result)
 
-            # TODO convert to Points API
-            #p = Point(measurement_name)
-            self._influx.write_api.write(self._influx.bucket, self._influx.org, data)
-
-        except subprocess.CalledProcessError as cpe:
-            log.warning(f"Exception: {cpe}")
 
 if __name__ == '__main__':
     # Don't set globally incase used as module which should set this.
@@ -173,25 +166,42 @@ if __name__ == '__main__':
     #format='%(asctime)s %(levelname)-8s %(message)s',
     #datefmt='%Y-%m-%d %H:%M:%S'
 
+    # Inof level prints every request, quiet it down.
+    logging.getLogger('jsonrpcclient.client').setLevel(logging.WARNING)
+
     # Load configuration
     import configparser
     config_all = configparser.ConfigParser()
     config_all.read('config.ini')
 
     client = InfluxDBClient.from_config_file("config.ini")
-    write_api = client.write_api()
-    influx = InfluxCtx(client, config_all['influx2']['org'], config_all['general']['bucket'], write_api)
 
-    # TODO Simpler invocation later?
-    # /opt/miner/bin/nodetool -B -- -root /usr/local/lib/erlang -progname erl -- -home /root -- -boot no_dot_erlang -noshell -run escript start -- -name maintaf0915d1-val_miner@127.0.0.1 -setcookie miner -- -extra /opt/miner/bin/nodetool -name val_miner@127.0.0.1 rpc miner_console command hbbft perf
+    mc = MinerClient(host='172.20.0.2')
 
-    base_cmd = ('docker', 'exec', '-te', 'COLUMNS=200', 'crypto_helium-validator_1', 'nice', '-n20')
+    addr = mc.peer_addr().removeprefix('/p2p/')
+    # FIXME with mc.info_version() when it's merged :-/, this is very slow and expensive
+    # FIXME poll the version periodically
+    summary = mc.info_summary()
+
+    tags = { 'addr': addr, 'name': summary['name'], 'version': summary['version'], 'net': 'main' }
+    ps = PointSettings(**{k: str(v) for k, v in tags.items()})
+    write_api = client.write_api(point_settings=ps)
+
+    influx = InfluxCtx(client, config_all['general']['bucket'], write_api)
+
+    """
+    Things to monitor ref: https://docs.helium.com/mine-hnt/validators/monitoring/
+    * miner info p2p_status
+    * miner peer book -s
+    * miner ledger validators (self)
+    * miner hbbft perf (self) - hard to use, crashes if not foudn
+    """
+
     cmds = (
-        SchedCmd(base_cmd + ('miner', 'hbbft',  'perf'),       miner_parser_handler, SchedParams(15, 0, 10)),
-        SchedCmd(base_cmd + ('miner', 'ledger', 'validators'), miner_parser_handler, SchedParams(20, 2, 100)),
-        #SchedCmd(base_cmd + ('miner', 'info',   'p2p_status'), WRITE_ME, SchedParams(60, 4, 200))
-        # TODO `ledger variables --all` + parser
-        # TODO `peer book -s` + parser
+        SchedCmd(mc.info_p2p_status,                    info_p2p_status_handler,   SchedParams(60, 0, 10)),
+        SchedCmd(partial(mc.peer_book,         'self'), peer_book_handler,         SchedParams(60, 0, 10)),
+        SchedCmd(partial(mc.ledger_validators, 'self'), ledger_validators_handler, SchedParams(60, 0, 10)),
+        #SchedCmd(mc.hbbft_perf,        miner_parser_handler, SchedParams(15, 0, 10)),
     )
 
     # Run forever
