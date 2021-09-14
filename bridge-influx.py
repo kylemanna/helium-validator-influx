@@ -123,6 +123,27 @@ def ledger_validators_handler(pt, raw_result):
     except:
         pass
 
+def ledger_balance_handler(pt, raw_result):
+    """ Example:
+    >>> print(json.dumps(mc.ledger_balance(a), indent=4))
+    {
+        "address": "13M48crbuT1XqsAti5wrHcPLzdAGKxtF8zEgPyNJESCu3drvLyB",
+        "balance": 1416024606,
+        "nonce": 0
+    }
+
+    """
+
+    try:
+        balance = raw_result
+        # Override addr since this has nothing to do with validator address
+        pt.tag('addr', balance['address'])
+        pt.field('balance', balance['balance'])
+        pt.field('nonce', balance['nonce'])
+        return pt
+    except:
+        pass
+
 class CmdScheduler(sched.scheduler):
     @dataclass
     class CmdContext:
@@ -130,10 +151,11 @@ class CmdScheduler(sched.scheduler):
         cmd: SchedCmd
         next: float
 
-    def __init__(self, influx, cmds):
+    def __init__(self, influx, cmds, addr):
         super().__init__()
 
         self._influx = influx
+        self._addr = addr
 
         start = time.monotonic()
         for cmd in cmds:
@@ -152,7 +174,10 @@ class CmdScheduler(sched.scheduler):
 
         measurement_name = cmd.method.func.__name__ if isinstance(cmd.method, partial) else cmd.method.__name__
 
-        pt = Point(measurement_name).time(datetime.now(timezone.utc))
+        # Can't use PointSettings when instantiating the WriteApi as it'll
+        # override the `addr` tag when we don't want it to.
+        pt = Point(measurement_name).time(datetime.now(timezone.utc)).tag('addr', addr)
+
         result = ctx.cmd.handler(pt, raw_result)
         #log.debug(f"Point(s) {result}")
 
@@ -183,7 +208,8 @@ if __name__ == '__main__':
     # FIXME poll the version periodically
     summary = mc.info_summary()
 
-    tags = { 'addr': addr, 'name': summary['name'], 'version': summary['version'], 'net': 'main' }
+    #tags = { 'addr': addr, 'name': summary['name'], 'version': summary['version'], 'net': 'main' }
+    tags = { 'name': summary['name'], 'version': summary['version'], 'net': 'main' }
     ps = PointSettings(**{k: str(v) for k, v in tags.items()})
     write_api = client.write_api(point_settings=ps)
 
@@ -197,13 +223,20 @@ if __name__ == '__main__':
     * miner hbbft perf (self) - hard to use, crashes if not foudn
     """
 
-    cmds = (
-        SchedCmd(mc.info_p2p_status,                    info_p2p_status_handler,   SchedParams(60, 0, 10)),
-        SchedCmd(partial(mc.peer_book,         'self'), peer_book_handler,         SchedParams(60, 0, 10)),
-        SchedCmd(partial(mc.ledger_validators, 'self'), ledger_validators_handler, SchedParams(60, 0, 10)),
+    # Can be self or a real address to save on json rpc invocation
+
+    cmds = [
+        SchedCmd(mc.info_p2p_status,                  info_p2p_status_handler,   SchedParams(60, 0, 10)),
+        SchedCmd(partial(mc.peer_book,       'self'), peer_book_handler,         SchedParams(60, 0, 10)),
+        SchedCmd(partial(mc.ledger_validators, addr), ledger_validators_handler, SchedParams(60, 0, 10)),
         #SchedCmd(mc.hbbft_perf,        miner_parser_handler, SchedParams(15, 0, 10)),
-    )
+    ]
+
+    if 'ledger' in config_all and 'addresses' in config_all['ledger']:
+        for a in config_all['ledger']['addresses'].split(','):
+            log.info(f"Monitoring address {a}")
+            cmds.extend([SchedCmd(partial(mc.ledger_balance, a), ledger_balance_handler, SchedParams(60, 0, 10))])
 
     # Run forever
-    cs = CmdScheduler(influx, cmds)
+    cs = CmdScheduler(influx, cmds, addr)
     cs.run()
