@@ -196,12 +196,12 @@ if __name__ == '__main__':
 
     # Load configuration
     import configparser
-    config_all = configparser.ConfigParser()
-    config_all.read('config.ini')
+    cfg = configparser.ConfigParser()
+    cfg.read('config.ini')
 
     client = InfluxDBClient.from_config_file("config.ini")
 
-    mc = MinerClient(host='172.20.0.2')
+    mc = MinerClient(host=cfg['validator']['host'])
 
     addr = mc.peer_addr().removeprefix('/p2p/')
     # FIXME with mc.info_version() when it's merged :-/, this is very slow and expensive
@@ -213,7 +213,7 @@ if __name__ == '__main__':
     ps = PointSettings(**{k: str(v) for k, v in tags.items()})
     write_api = client.write_api(point_settings=ps)
 
-    influx = InfluxCtx(client, config_all['general']['bucket'], write_api)
+    influx = InfluxCtx(client, cfg['general']['bucket'], write_api)
 
     """
     Things to monitor ref: https://docs.helium.com/mine-hnt/validators/monitoring/
@@ -232,8 +232,8 @@ if __name__ == '__main__':
         #SchedCmd(mc.hbbft_perf,        miner_parser_handler, SchedParams(15, 0, 10)),
     ]
 
-    if 'ledger' in config_all and 'addresses' in config_all['ledger']:
-        for a in config_all['ledger']['addresses'].split(','):
+    if 'ledger' in cfg and 'addresses' in cfg['ledger']:
+        for a in cfg['ledger']['addresses'].split(','):
             log.info(f"Monitoring address {a}")
             cmds.extend([SchedCmd(partial(mc.ledger_balance, a), ledger_balance_handler, SchedParams(60, 0, 10))])
 

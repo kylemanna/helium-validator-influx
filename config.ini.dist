@@ -6,3 +6,6 @@ bucket=helium-validator-monitor
 url=http://influxdb:8086/
 org=helium
 token=Long-Secret-Token
+
+[validator]
+host=127.0.0.1
