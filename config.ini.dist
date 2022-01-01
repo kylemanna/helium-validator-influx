@@ -9,3 +9,7 @@ token=Long-Secret-Token
 
 [validator]
 host=127.0.0.1
+
+[ledger]
+address=123a,123b
+validators=123x,123y

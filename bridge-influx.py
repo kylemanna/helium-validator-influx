@@ -22,6 +22,9 @@ SchedCmd    = namedtuple('SchedCmd', 'method, handler, sched')
 SchedParams = namedtuple('SchedParams', 'period, delay, priority')
 InfluxCtx   = namedtuple('InfluxCtx', 'client, bucket, write_api')
 
+# Hack for global
+summary = None
+
 def str_to_native(s):
     """Convert a string to a native pythonic type if possible"""
     if type(s) != str:
@@ -114,13 +117,20 @@ def ledger_validators_handler(pt, raw_result):
     }
     """
 
+    # Unstaked/invalid validators will return a NoneType
+    if not raw_result:
+        return
+
     try:
         validator = raw_result
         keys = ['dkg_penalty', 'last_heartbeat', 'performance_penalty', 'stake', 'status', 'tenure_penalty', 'total_penalty', 'version']
         for k in keys:
             pt.field(k, validator[k])
+        pt.tag('addr', validator['address'])
+        pt.tag('name', validator['name'])
         return pt
-    except:
+    except Exception as e:
+        log.debug(f"Error in ledger_validators_handler: {e}")
         pass
 
 def ledger_balance_handler(pt, raw_result):
@@ -176,7 +186,10 @@ class CmdScheduler(sched.scheduler):
 
         # Can't use PointSettings when instantiating the WriteApi as it'll
         # override the `addr` tag when we don't want it to.
-        pt = Point(measurement_name).time(datetime.now(timezone.utc)).tag('addr', addr)
+        pt = Point(measurement_name)
+        pt.time(datetime.now(timezone.utc))
+        pt.tag('addr', addr)
+        pt.tag('name', summary['name'])
 
         result = ctx.cmd.handler(pt, raw_result)
         #log.debug(f"Point(s) {result}")
@@ -191,8 +204,9 @@ if __name__ == '__main__':
     #format='%(asctime)s %(levelname)-8s %(message)s',
     #datefmt='%Y-%m-%d %H:%M:%S'
 
-    # Inof level prints every request, quiet it down.
+    # Info level prints every request, quiet it down.
     logging.getLogger('jsonrpcclient.client').setLevel(logging.WARNING)
+    logging.getLogger('charset_normalizer').setLevel(logging.WARNING)
 
     # Load configuration
     import configparser
@@ -209,7 +223,8 @@ if __name__ == '__main__':
     summary = mc.info_summary()
 
     #tags = { 'addr': addr, 'name': summary['name'], 'version': summary['version'], 'net': 'main' }
-    tags = { 'name': summary['name'], 'version': summary['version'], 'net': 'main' }
+    #tags = { 'name': summary['name'], 'version': summary['version'], 'net': 'main' }
+    tags = { 'net': 'main' }
     ps = PointSettings(**{k: str(v) for k, v in tags.items()})
     write_api = client.write_api(point_settings=ps)
 
@@ -228,14 +243,19 @@ if __name__ == '__main__':
     cmds = [
         SchedCmd(mc.info_p2p_status,                  info_p2p_status_handler,   SchedParams(60, 0, 10)),
         SchedCmd(partial(mc.peer_book,       'self'), peer_book_handler,         SchedParams(60, 0, 10)),
-        SchedCmd(partial(mc.ledger_validators, addr), ledger_validators_handler, SchedParams(60, 0, 10)),
         #SchedCmd(mc.hbbft_perf,        miner_parser_handler, SchedParams(15, 0, 10)),
     ]
 
-    if 'ledger' in cfg and 'addresses' in cfg['ledger']:
-        for a in cfg['ledger']['addresses'].split(','):
-            log.info(f"Monitoring address {a}")
-            cmds.extend([SchedCmd(partial(mc.ledger_balance, a), ledger_balance_handler, SchedParams(60, 0, 10))])
+    if 'ledger' in cfg:
+        if 'addresses' in cfg['ledger']:
+            for a in cfg['ledger']['addresses'].split(','):
+                log.info(f"Monitoring address {a}")
+                cmds.extend([SchedCmd(partial(mc.ledger_balance, a), ledger_balance_handler, SchedParams(60, 0, 10))])
+
+        if 'validators' in cfg['ledger']:
+            for v in cfg['ledger']['validators'].split(','):
+                log.info(f"Monitoring validator {v}")
+                cmds.extend([SchedCmd(partial(mc.ledger_validators, v), ledger_validators_handler, SchedParams(60, 0, 10))])
 
     # Run forever
     cs = CmdScheduler(influx, cmds, addr)
