@@ -18,12 +18,10 @@ import sched
 log_name = 'validator-monitor' if __name__ == '__main__' else '.'.join((__name__.split('.')[-2:]))
 log = logging.getLogger(log_name)
 
-SchedCmd    = namedtuple('SchedCmd', 'method, handler, sched')
+SchedCmd    = namedtuple('SchedCmd', 'method, handler, sched, validator')
 SchedParams = namedtuple('SchedParams', 'period, delay, priority')
 InfluxCtx   = namedtuple('InfluxCtx', 'client, bucket, write_api')
-
-# Hack for global
-summary = None
+Validator   = namedtuple('Validator', 'mc, name, addr, summary')
 
 def str_to_native(s):
     """Convert a string to a native pythonic type if possible"""
@@ -161,11 +159,10 @@ class CmdScheduler(sched.scheduler):
         cmd: SchedCmd
         next: float
 
-    def __init__(self, influx, cmds, addr):
+    def __init__(self, influx, cmds):
         super().__init__()
 
         self._influx = influx
-        self._addr = addr
 
         start = time.monotonic()
         for cmd in cmds:
@@ -188,8 +185,8 @@ class CmdScheduler(sched.scheduler):
         # override the `addr` tag when we don't want it to.
         pt = Point(measurement_name)
         pt.time(datetime.now(timezone.utc))
-        pt.tag('addr', addr)
-        pt.tag('name', summary['name'])
+        pt.tag('addr', cmd.validator.addr)
+        pt.tag('name', cmd.validator.name)
 
         result = ctx.cmd.handler(pt, raw_result)
         #log.debug(f"Point(s) {result}")
@@ -215,15 +212,16 @@ if __name__ == '__main__':
 
     client = InfluxDBClient.from_config_file("config.ini")
 
-    mc = MinerClient(host=cfg['validator']['host'])
+    validators = list()
+    for h in cfg['validator']['host'].split(','):
+        mc = MinerClient(host=h)
+        addr = mc.peer_addr().removeprefix('/p2p/')
+        summary = mc.info_summary()
+        validators += [ Validator(mc, h, addr, summary) ]
 
-    addr = mc.peer_addr().removeprefix('/p2p/')
     # FIXME with mc.info_version() when it's merged :-/, this is very slow and expensive
     # FIXME poll the version periodically
-    summary = mc.info_summary()
 
-    #tags = { 'addr': addr, 'name': summary['name'], 'version': summary['version'], 'net': 'main' }
-    #tags = { 'name': summary['name'], 'version': summary['version'], 'net': 'main' }
     tags = { 'net': 'main' }
     ps = PointSettings(**{k: str(v) for k, v in tags.items()})
     write_api = client.write_api(point_settings=ps)
@@ -240,23 +238,24 @@ if __name__ == '__main__':
 
     # Can be self or a real address to save on json rpc invocation
 
-    cmds = [
-        SchedCmd(mc.info_p2p_status,                  info_p2p_status_handler,   SchedParams(60, 0, 10)),
-        SchedCmd(partial(mc.peer_book,       'self'), peer_book_handler,         SchedParams(60, 0, 10)),
+    cmds = []
+    for v in validators:
+        cmds += [ SchedCmd(v.mc.info_p2p_status,            info_p2p_status_handler,   SchedParams(60, 0, 10), v) ]
+        cmds += [ SchedCmd(partial(v.mc.peer_book, 'self'), peer_book_handler,         SchedParams(60, 0, 10), v) ]
         #SchedCmd(mc.hbbft_perf,        miner_parser_handler, SchedParams(15, 0, 10)),
-    ]
 
+    query_validator = validators[0]
     if 'ledger' in cfg:
         if 'addresses' in cfg['ledger']:
             for a in cfg['ledger']['addresses'].split(','):
                 log.info(f"Monitoring address {a}")
-                cmds.extend([SchedCmd(partial(mc.ledger_balance, a), ledger_balance_handler, SchedParams(60, 0, 10))])
+                cmds += [SchedCmd(partial(mc.ledger_balance, a), ledger_balance_handler, SchedParams(60, 0, 10), query_validator)]
 
         if 'validators' in cfg['ledger']:
             for v in cfg['ledger']['validators'].split(','):
                 log.info(f"Monitoring validator {v}")
-                cmds.extend([SchedCmd(partial(mc.ledger_validators, v), ledger_validators_handler, SchedParams(60, 0, 10))])
+                cmds += [SchedCmd(partial(mc.ledger_validators, v), ledger_validators_handler, SchedParams(60, 0, 10), query_validator)]
 
     # Run forever
-    cs = CmdScheduler(influx, cmds, addr)
+    cs = CmdScheduler(influx, cmds)
     cs.run()
