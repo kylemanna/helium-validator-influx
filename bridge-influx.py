@@ -213,11 +213,14 @@ if __name__ == '__main__':
     client = InfluxDBClient.from_config_file("config.ini")
 
     validators = list()
-    for h in cfg['validator']['host'].split(','):
-        mc = MinerClient(host=h)
+    for hp in cfg['validator']['host'].split(','):
+        d = dict(zip(('name', 'host', 'port'), hp.split(':')))
+        if not d.get('host'): d['host'] = d['name']
+        kwargs = {k: d[k] for k in ('host', 'port') if k in d}
+        mc = MinerClient(**kwargs)
         addr = mc.peer_addr().removeprefix('/p2p/')
         summary = mc.info_summary()
-        validators += [ Validator(mc, h, addr, summary) ]
+        validators += [ Validator(mc, d['name'], addr, summary) ]
 
     # FIXME with mc.info_version() when it's merged :-/, this is very slow and expensive
     # FIXME poll the version periodically
