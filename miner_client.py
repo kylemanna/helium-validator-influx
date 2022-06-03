@@ -14,13 +14,14 @@ class MinerClient:
     def __init__(self, scheme="http", host="localhost", port=4467, logging=False):
         self.url = f'{scheme}://{host}:{port}/jsonrpc'
         self.client = HTTPClient(self.url, basic_logging=logging)
+        self.timeout = 30
 
     def http_post(self, method, **kwargs):
         try:
           if not kwargs:              
-            response = self.client.send(Request(method))
+            response = self.client.send(Request(method), timeout=self.timeout)
           else:
-            response = self.client.send(Request(method, **kwargs))
+            response = self.client.send(Request(method, **kwargs), timeout=self.timeout)
 
           return response.data.result
 
