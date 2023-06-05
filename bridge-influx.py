@@ -172,12 +172,18 @@ class CmdScheduler(sched.scheduler):
     def run_cmd(self, ctx):
         # Reschedule
         cmd = ctx.cmd
+        log.info(f"Start {cmd.method}")
+        start = time.monotonic()
         while ctx.next < time.monotonic():
             ctx.next += cmd.sched.period
             self.enterabs(ctx.next, cmd.sched.priority, self.run_cmd, (ctx,))
 
-        raw_result = cmd.method()
-        #log.debug(f"{cmd.method} -> {raw_result}")
+        try:
+            raw_result = cmd.method()
+        except Exception as e:
+            log.error(f"Exception for {cmd.method}: {e}")
+            log.info(f"Stop {cmd.method} @ {time.monotonic() - start}")
+            return
 
         measurement_name = cmd.method.func.__name__ if isinstance(cmd.method, partial) else cmd.method.__name__
 
@@ -193,6 +199,8 @@ class CmdScheduler(sched.scheduler):
 
         if result:
             self._influx.write_api.write(self._influx.bucket, None, result)
+
+        log.info(f"Stop {cmd.method} @ {time.monotonic() - start}")
 
 
 if __name__ == '__main__':
